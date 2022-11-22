@@ -1,6 +1,8 @@
 import functools
+import heapq
 import time
-from collections import OrderedDict
+from collections import Counter
+from operator import itemgetter
 import requests
 import tracemalloc
 
@@ -15,6 +17,7 @@ def memory(func):
         top_stats = start_snapshot.compare_to(finish_snapshot, 'lineno')
         print(f'Used memory: {top_stats.__sizeof__() / 1024} Mb')
         return value
+
     return wrapper_memory
 
 
@@ -31,32 +34,44 @@ def timer(func):
     return wrapper_timer
 
 
-def cache(_func=None, *, max_limit=2):
+def cache_deco(_func, max_limit=2):
     def internal(func):
+        cache = {}
+        use_count = Counter()
+        kwarg_mark = object()
+
         @functools.wraps(func)
         def deco(*args, **kwargs):
-            cache_key = (args, tuple(kwargs.items()))
-            if cache_key in deco.cache:
-                deco.cache.move_to_end(cache_key, last=False)
-                return deco.cache[cache_key]
-            result = func(*args, **kwargs)
-            if len(deco.cache) >= max_limit:
-                deco.cache.popitem(last=True)
-            deco.cache[cache_key] = result
+            key = args
+            if kwargs:
+                key += (kwarg_mark,) + tuple(sorted(kwargs.items()))
+
+            try:
+                result = cache[key]
+                use_count[key] += 1
+                deco.hits += 1
+            except KeyError:
+                if len(cache) == max_limit:
+                    for k, _ in heapq.nsmallest(max_limit // 10 or 1,
+                                                use_count.items(),
+                                                key=itemgetter(1)):
+                        del cache[k], use_count[k]
+                cache[key] = func(*args, **kwargs)
+                result = cache[key]
+                use_count[key] += 1
+                deco.misses += 1
             return result
 
-        deco.cache = OrderedDict()
+        deco.hits = deco.misses = 0
+        deco.cache = cache
         return deco
 
-    if _func is None:
-        return internal
-    else:
-        return internal(_func)
+    return internal(_func)
 
 
 @memory
 @timer
-@cache
+@cache_deco
 def fetch_url(_url):
     return requests.get(_url)
 
@@ -66,4 +81,5 @@ urls = ['https://google.com', 'https://google.com', 'https://youtube.com', 'http
 first_n = 100
 for url in urls:
     res = fetch_url(url)
-    print(res.content[:first_n] if first_n else res.content)
+    print(res.content[:first_n] if first_n
+          else res.content)
